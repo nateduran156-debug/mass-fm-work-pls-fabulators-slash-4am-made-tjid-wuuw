@@ -1,11 +1,32 @@
-// put your bot tokens here. the bot uses the first one, and if discord
-// kills/flags it the bot moves to the next one on its own. add a few.
+const fs = require("fs");
+
+const manual = [
+  "paste_token_1",
+  "paste_token_2",
+  "paste_token_3",
+];
+
+// gen.js writes tokens.json. if that file exists it wins over the list above.
+function getTokens() {
+  if (fs.existsSync("tokens.json")) {
+    try {
+      const made = JSON.parse(fs.readFileSync("tokens.json", "utf8"));
+      const list = made.map((a) => a.token).filter(Boolean);
+      if (list.length) return list;
+    } catch {}
+  }
+  return manual;
+}
+
 module.exports = {
-  tokens: [
-    "paste_token_1",
-    "paste_token_2",
-    "paste_token_3",
-  ],
+  manual,
+  getTokens,
+
+  // your account token. only gen.js uses it.
+  userToken: "paste_account_token",
+
+  // ms between app creations in gen.js. don't go under 2000.
+  genDelay: 3000,
 
   // your discord user id. you always have access and can never be removed.
   ownerId: "1456824205545967713",
@@ -13,7 +34,14 @@ module.exports = {
   // where whitelist.json gets saved.
   dataDir: ".",
 
-  // 10 second timeout between each dm so discord doesn't rate limit you.
-  // it's in milliseconds now. lower it if you want it faster.
-  dmDelay: 10000,
+  // your server id. makes slash commands show up instantly instead of
+  // taking up to an hour. leave it empty to sync globally.
+  syncGuildId: "",
+
+  // stuck on the end of every dm. paste a channel link here, or an invite
+  // like discord.gg/xxxx. leave it empty for nothing.
+  appendLink: "",
+
+  // 0 sends to everyone at once. raise it to stagger.
+  dmDelay: 0,
 };
