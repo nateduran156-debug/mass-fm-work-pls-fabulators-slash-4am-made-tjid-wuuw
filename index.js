@@ -34,11 +34,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let raidRunning = false;
 let needRotate = false;
 
+const MAX_ATTEMPTS = 6;
+const WAVES = 3;
+
 function buildContent(memberId, text, replyLink) {
   const parts = [`<@${memberId}>`, text];
   if (replyLink) parts.push(replyLink);
   if (config.appendLink) parts.push(config.appendLink);
   return parts.join(" ");
+}
+
+function isPermanent(e) {
+  if (e?.status === 403) return true;
+  if (e?.code === 50007) return true;
+  if (e?.code === 50035) return true;
+  return false;
+}
+
+async function sendOne(member, text, replyLink) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await member.send({
+        content: buildContent(member.id, text, replyLink),
+        allowedMentions: { parse: ["users"] },
+      });
+      return { ok: true };
+    } catch (e) {
+      if (e?.status === 401) return { ok: false, fatal: true };
+      if (isPermanent(e) || attempt >= MAX_ATTEMPTS) return { ok: false, err: e };
+      const wait = Math.min(20000, 400 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 350);
+      await sleep(wait);
+    }
+  }
 }
 
 async function runRaid(client, guild, text, replyLink, edit) {
@@ -48,18 +75,18 @@ async function runRaid(client, guild, text, replyLink, edit) {
 
   let members;
   try {
-    members = await guild.members.fetch();
+    members = await guild.members.fetch({ force: true });
   } catch {
     raidRunning = false;
     return edit("couldn't fetch the member list");
   }
 
-  const list = members.filter((m) => !m.user.bot).map((m) => m);
-  const total = list.length;
+  let queue = [...members.values()].filter((m) => !m.user.bot);
+  const total = queue.length;
   let sent = 0;
   let failed = 0;
   let done = 0;
-  let rotating = false;
+  let dead = false;
   let editing = false;
 
   const say = async (t) => {
@@ -70,33 +97,54 @@ async function runRaid(client, guild, text, replyLink, edit) {
   };
 
   try {
-    await Promise.all(
-      list.map(async (member) => {
-        try {
-          await member.send({
-            content: buildContent(member.id, text, replyLink),
-            allowedMentions: { parse: ["users"] },
-          });
-          sent++;
-        } catch (e) {
-          failed++;
-          if (e.status === 401 && !rotating) {
-            rotating = true;
-            needRotate = true;
-            await say("token got killed, switching to the next one");
-            client.destroy();
-            client.stop();
+    for (let wave = 1; wave <= WAVES && queue.length && !dead; wave++) {
+      const batch = queue;
+      queue = [];
+
+      if (wave > 1) {
+        await say(`retry wave ${wave - 1}/${WAVES - 1} for ${batch.length} people`);
+        await sleep(1500);
+      }
+
+      await Promise.all(
+        batch.map(async (member) => {
+          const r = await sendOne(member, text, replyLink);
+
+          if (r.ok) {
+            sent++;
+            if (wave === 1) done++;
+          } else if (r.fatal) {
+            dead = true;
+          } else {
+            queue.push(member);
+            if (wave === 1) done++;
           }
-        }
 
-        done++;
-        if (done % 25 === 0 || done === total) {
-          await say(`${done}/${total} | sent ${sent} | failed ${failed}`);
-        }
+          if (done % 25 === 0 || done === total) {
+            await say(`${done}/${total} | sent ${sent} | queued ${queue.length}`);
+          }
 
-        if (config.dmDelay > 0) await sleep(config.dmDelay);
-      })
-    );
+          if (config.dmDelay > 0) await sleep(config.dmDelay);
+        })
+      );
+    }
+
+    if (dead) {
+      needRotate = true;
+      client.destroy();
+      client.stop();
+      return;
+    }
+
+    failed = queue.length;
+    if (failed) {
+      try {
+        fs.writeFileSync(
+          path.join(config.dataDir, "failed.json"),
+          JSON.stringify(queue.map((m) => ({ id: m.id, tag: m.user.tag })), null, 2)
+        );
+      } catch {}
+    }
   } finally {
     raidRunning = false;
   }
