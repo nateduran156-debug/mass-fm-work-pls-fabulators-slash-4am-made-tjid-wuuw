@@ -3,7 +3,6 @@ const path = require("path");
 const {
   Client,
   GatewayIntentBits,
-  EmbedBuilder,
   SlashCommandBuilder,
   MessageFlags,
 } = require("discord.js");
@@ -35,21 +34,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let raidRunning = false;
 let needRotate = false;
 
-function makeEmbed(author, guild, text, replyLink) {
-  const embed = new EmbedBuilder()
-    .setDescription(text)
-    .setColor(0x2b2d31)
-    .setAuthor({ name: author.username, iconURL: author.displayAvatarURL() })
-    .setFooter({ text: guild.name });
-
-  if (replyLink) embed.addFields({ name: "replying to", value: replyLink });
-
-  return embed;
+function buildContent(memberId, text, replyLink) {
+  const parts = [`<@${memberId}>`, text];
+  if (replyLink) parts.push(replyLink);
+  if (config.appendLink) parts.push(config.appendLink);
+  return parts.join(" ");
 }
 
-async function runRaid(client, guild, author, text, replyLink, edit) {
+async function runRaid(client, guild, text, replyLink, edit) {
   raidRunning = true;
-  const embed = makeEmbed(author, guild, text, replyLink);
+
+  if (text.length > 1800) text = text.slice(0, 1800);
 
   let members;
   try {
@@ -63,35 +58,50 @@ async function runRaid(client, guild, author, text, replyLink, edit) {
   const total = list.length;
   let sent = 0;
   let failed = 0;
+  let done = 0;
+  let rotating = false;
+  let editing = false;
+
+  const say = async (t) => {
+    if (editing) return;
+    editing = true;
+    await edit(t).catch(() => {});
+    editing = false;
+  };
 
   try {
-    for (let i = 0; i < list.length; i++) {
-      try {
-        await list[i].send({ embeds: [embed] });
-        sent++;
-      } catch (e) {
-        failed++;
-        if (e.status === 401) {
-          needRotate = true;
-          await edit("token got killed, switching to the next one");
-          client.destroy();
-          client.stop();
-          return;
+    await Promise.all(
+      list.map(async (member) => {
+        try {
+          await member.send({
+            content: buildContent(member.id, text, replyLink),
+            allowedMentions: { parse: ["users"] },
+          });
+          sent++;
+        } catch (e) {
+          failed++;
+          if (e.status === 401 && !rotating) {
+            rotating = true;
+            needRotate = true;
+            await say("token got killed, switching to the next one");
+            client.destroy();
+            client.stop();
+          }
         }
-      }
 
-      const done = i + 1;
-      if (done % 10 === 0 || done === total) {
-        await edit(`${done}/${total} | sent ${sent} | failed ${failed}`);
-      }
+        done++;
+        if (done % 25 === 0 || done === total) {
+          await say(`${done}/${total} | sent ${sent} | failed ${failed}`);
+        }
 
-      await sleep(config.dmDelay);
-    }
+        if (config.dmDelay > 0) await sleep(config.dmDelay);
+      })
+    );
   } finally {
     raidRunning = false;
   }
 
-  await edit(`done. sent ${sent}, failed ${failed}, total ${total}`);
+  await say(`done. sent ${sent}, failed ${failed}, total ${total}`);
 }
 
 const commands = [
@@ -123,7 +133,11 @@ function buildClient() {
   client.once("ready", async () => {
     console.log(`logged in as ${client.user.tag}`);
     try {
-      await client.application.commands.set(commands);
+      if (config.syncGuildId) {
+        await client.application.commands.set(commands, config.syncGuildId);
+      } else {
+        await client.application.commands.set(commands);
+      }
       console.log("slash commands synced");
     } catch (e) {
       console.log("sync failed:", e.message);
@@ -155,7 +169,7 @@ function buildClient() {
     const status = await message.reply({ content: "starting...", ...noPing });
     const edit = (t) => status.edit(t).catch(() => {});
 
-    runRaid(client, message.guild, message.author, text, replyLink, edit);
+    runRaid(client, message.guild, text, replyLink, edit);
   });
 
   client.on("interactionCreate", async (interaction) => {
@@ -173,7 +187,7 @@ function buildClient() {
       const status = await interaction.fetchReply();
       const edit = (t) => status.edit(t).catch(() => {});
 
-      runRaid(interaction.client, interaction.guild, interaction.user, text, null, edit);
+      runRaid(interaction.client, interaction.guild, text, null, edit);
       return;
     }
 
@@ -208,13 +222,20 @@ async function main() {
   let index = 0;
 
   while (true) {
-    if (index >= config.tokens.length * 2) {
+    const tokens = config.getTokens();
+
+    if (!tokens.length) {
+      console.log("no tokens in config.js or tokens.json");
+      return;
+    }
+
+    if (index >= tokens.length * 2) {
       console.log("every token failed, waiting a minute");
       await sleep(60000);
       index = 0;
     }
 
-    const token = config.tokens[index % config.tokens.length];
+    const token = tokens[index % tokens.length];
     const client = buildClient();
 
     try {
