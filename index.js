@@ -34,8 +34,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let raidRunning = false;
 let needRotate = false;
 
-const MAX_ATTEMPTS = 6;
-const WAVES = 3;
+const MAX_ATTEMPTS = 3;
+const WAVES = 2;
 
 function buildContent(memberId, text, replyLink) {
   const parts = [`<@${memberId}>`, text];
@@ -62,8 +62,6 @@ async function sendOne(member, text, replyLink) {
     } catch (e) {
       if (e?.status === 401) return { ok: false, fatal: true };
       if (isPermanent(e) || attempt >= MAX_ATTEMPTS) return { ok: false, err: e };
-      const wait = Math.min(20000, 400 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 350);
-      await sleep(wait);
     }
   }
 }
@@ -101,11 +99,6 @@ async function runRaid(client, guild, text, replyLink, edit) {
       const batch = queue;
       queue = [];
 
-      if (wave > 1) {
-        await say(`retry wave ${wave - 1}/${WAVES - 1} for ${batch.length} people`);
-        await sleep(1500);
-      }
-
       await Promise.all(
         batch.map(async (member) => {
           const r = await sendOne(member, text, replyLink);
@@ -118,13 +111,12 @@ async function runRaid(client, guild, text, replyLink, edit) {
           } else {
             queue.push(member);
             if (wave === 1) done++;
+            if (r.err) console.log(`failed ${member.user.tag}: ${r.err.status || r.err.message}`);
           }
 
-          if (done % 25 === 0 || done === total) {
+          if (done % 10 === 0 || done === total) {
             await say(`${done}/${total} | sent ${sent} | queued ${queue.length}`);
           }
-
-          if (config.dmDelay > 0) await sleep(config.dmDelay);
         })
       );
     }
